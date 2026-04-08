@@ -71,7 +71,9 @@ def _discover_students(
         if team_filter and team_dir.name != team_filter:
             continue
 
-        strategy_file = team_dir / "strategy.py"
+        # Prefer compiled .so over .py
+        so_files = list(team_dir.glob("strategy.cpython-*.so")) + list(team_dir.glob("strategy.*.so"))
+        strategy_file = so_files[0] if so_files else team_dir / "strategy.py"
         if not strategy_file.exists():
             continue
 

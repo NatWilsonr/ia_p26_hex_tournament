@@ -12,3 +12,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt cython setuptools
 
 COPY . .
+
+# Auto-compile student strategies (best-effort)
+RUN bash tools/build_students.sh || true

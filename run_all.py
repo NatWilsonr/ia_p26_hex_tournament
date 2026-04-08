@@ -49,7 +49,7 @@ examples:
 """,
     )
     parser.add_argument("--num-games", type=int, default=None,
-                        help="Games per pair (default: 3 quick, 5 official, 10 real)")
+                        help="Games per pair per variant (default: 4 quick/official, 10 real)")
     parser.add_argument("--real", action="store_true",
                         help="Real evaluation tournament: both variants, 10 games/pair, "
                              "eval mode (students vs defaults only)")
@@ -84,10 +84,10 @@ examples:
         move_timeout = args.move_timeout or 15.0
     elif args.official:
         cmd.append("--official")
-        num_games = args.num_games or 5
+        num_games = args.num_games or 4
         move_timeout = args.move_timeout or 15.0
     else:
-        num_games = args.num_games or 3
+        num_games = args.num_games or 4
         move_timeout = args.move_timeout or 15.0
 
     cmd += ["--num-games", str(num_games)]
@@ -99,10 +99,6 @@ examples:
 
     if args.team:
         cmd += ["--team", args.team]
-
-    if args.team:
-        json_path = f"estudiantes/{args.team}/results/tournament_results.json"
-        cmd += ["--json", json_path]
 
     _run(cmd)
 

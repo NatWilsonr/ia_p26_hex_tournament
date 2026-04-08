@@ -2,42 +2,16 @@
 
 Torneo de estrategias de Hex para el curso de Inteligencia Artificial.
 
-Tu equipo implementa **una sola estrategia** que juega Hex en un tablero de **11x11** en dos variantes: **classic** y **dark** (fog of war). El framework descubre todas las estrategias, las enfrenta contra 6 niveles de dificultad, y genera calificaciones automaticamente.
+Tu equipo implementa **una sola estrategia** que juega Hex en un tablero de **11x11** en dos variantes: **classic** y **dark** (fog of war). El framework descubre todas las estrategias, ejecuta un torneo en formato **liga** (round-robin) con aislamiento de procesos, y genera calificaciones automaticamente.
 
 ---
 
-## Reglas de Hex
+## Documentacion
 
-Hex se juega en un tablero romboidal de hexagonos. Dos jugadores se alternan colocando piedras:
-
-- **Negro (Player 1)**: conecta el borde **superior** (fila 0) con el borde **inferior** (fila N-1).
-- **Blanco (Player 2)**: conecta el borde **izquierdo** (columna 0) con el borde **derecho** (columna N-1).
-
-**Reglas:**
-- No hay capturas — las piedras son permanentes.
-- El primer jugador en conectar sus dos bordes gana.
-- **No hay empates** en Hex (la geometria hexagonal lo garantiza).
-- Cada celda tiene **6 vecinos**: `(-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0)`.
-
-**Tablero 11x11**: 121 celdas. Espacio de estados enorme — minimax puro es inviable. Necesitas MCTS, heuristicas, o tecnicas avanzadas.
-
----
-
-## Dos variantes
-
-### Classic Hex
-Tablero vacio al inicio. Informacion perfecta — ambos jugadores ven todo.
-
-### Dark Hex (Fog of War)
-Cada jugador **solo ve sus propias piedras** y las piedras del oponente que ha descubierto por **colision**.
-
-**Mecanica de colision:**
-- Intentas jugar en `(r, c)` que ya tiene una piedra oculta del oponente.
-- **Pierdes tu turno**, pero ahora puedes ver esa piedra.
-- `on_move_result(move, success)` te informa: `success=True` (se coloco) o `success=False` (colision).
-- `last_move` siempre es `None` en dark mode — no sabes donde jugo el oponente.
-
-Dark Hex introduce **informacion imperfecta**: debes razonar sobre lo que no puedes ver. Tecnicas como determinizacion o Information Set MCTS son esenciales.
+| Documento | Descripcion |
+|-----------|-------------|
+| **[Guia para equipos](docs/team_guide.md)** | Paso a paso: setup, implementacion, pruebas, entrega |
+| **[Reglas del torneo](docs/rules.md)** | Mecanica del juego, formato, restricciones, juego limpio |
 
 ---
 
@@ -64,68 +38,174 @@ python3 run_all.py
 
 ## Que tienes que hacer
 
-### 1. Crea tu equipo
+1. **Crea tu equipo**: `cp -r estudiantes/_template estudiantes/mi_equipo`
+2. **Edita** `estudiantes/mi_equipo/strategy.py` — una clase que hereda de `Strategy`
+3. **Estudia** `strategies/random_strat.py` — es la unica estrategia con codigo visible, usala como referencia
+4. **Prueba** contra Random localmente, luego contra los tiers MCTS en Docker
+5. **Documenta** tu estrategia en `estudiantes/mi_equipo/README.md`
+6. **Entrega** via Pull Request
+
+Tu estrategia debe funcionar para **ambas variantes** (classic y dark).
+
+Para la guia detallada paso a paso, consulta **[docs/team_guide.md](docs/team_guide.md)**.
+
+---
+
+## Comandos principales
+
+### Sin Docker (solo Random)
 
 ```bash
-cp -r estudiantes/_template estudiantes/mi_equipo
-```
-
-### 2. Edita `estudiantes/mi_equipo/strategy.py`
-
-```python
-from strategy import Strategy, GameConfig
-from hex_game import get_neighbors, check_winner, shortest_path_distance, empty_cells
-
-class MiEstrategia(Strategy):
-    @property
-    def name(self) -> str:
-        return "MiEstrategia_mi_equipo"   # nombre unico
-
-    def begin_game(self, config: GameConfig) -> None:
-        self._size = config.board_size
-        self._player = config.player
-        self._opponent = config.opponent
-        self._time_limit = config.time_limit
-
-    def on_move_result(self, move, success):
-        # success=True: tu piedra se coloco
-        # success=False: colision (dark mode) — perdiste el turno
-        pass
-
-    def play(self, board, last_move):
-        # board[r][c]: 0=vacio, 1=Negro, 2=Blanco
-        # last_move: (row, col) del oponente, o None
-        # Devuelve (row, col) de una celda vacia
-        moves = empty_cells(board, self._size)
-        return moves[0]  # reemplaza con tu logica
-```
-
-**Tu estrategia debe funcionar para ambas variantes (classic y dark).**
-
-### 3. Prueba con Docker
-
-```bash
-# Tu estrategia contra Random (no necesita Docker)
+# Tu estrategia contra Random
 python3 experiment.py --black "MiEstrategia_mi_equipo" --white "Random" --num-games 5 --verbose
 
-# Tu estrategia contra tiers MCTS (requiere Docker)
+# Torneo rapido
+python3 run_all.py
+```
+
+### Con Docker (tiers MCTS)
+
+```bash
+# Tu estrategia contra un tier especifico
 docker compose run experiment \
   python experiment.py --black "MiEstrategia_mi_equipo" --white "MCTS_Tier_3" \
   --num-games 5 --verbose
 
-# Variante dark
-docker compose run experiment \
-  python experiment.py --black "MiEstrategia_mi_equipo" --white "MCTS_Tier_2" \
-  --variant dark --num-games 3 --verbose
-
 # Torneo completo: tu equipo vs todos los defaults
 TEAM=mi_equipo docker compose up team-tournament
+
+# Torneo oficial (ambas variantes, liga)
+docker compose up tournament
 ```
 
-### 4. Entrega: abre un Pull Request
+### Opciones de `run_all.py`
 
 ```bash
-git add estudiantes/mi_equipo/strategy.py
+python3 run_all.py                          # rapido (classic, 4 games/pair)
+python3 run_all.py --official               # ambas variantes, liga, 4 games/pair
+python3 run_all.py --team mi_equipo         # solo tu equipo vs defaults
+python3 run_all.py --real                   # evaluacion (10 games/pair)
+```
+
+---
+
+## Calificacion
+
+### Formato del torneo
+
+El torneo se juega en formato **liga round-robin** (todos contra todos) en **dos variantes** del juego: classic y dark.
+
+#### Paso 1: Se juegan dos ligas
+
+- **Liga classic**: todos contra todos en Hex clasico (informacion perfecta).
+- **Liga dark**: todos contra todos en Dark Hex (fog of war).
+- Cada par juega **4 partidas por variante** (2 como Negro, 2 como Blanco — balance de color perfecto).
+- **Victoria = 1 punto, derrota = 0 puntos.** No hay empates en Hex.
+
+#### Paso 2: Se suman los puntos de ambas ligas
+
+Tus puntos de la liga classic + tus puntos de la liga dark = tus **puntos totales**.
+
+#### Paso 3: Se determina que modelos venciste
+
+Hay **6 modelos** de dificultad creciente en el torneo. Tu estrategia juega contra todos ellos (y contra las demas estrategias de estudiantes). Al final, se comparan los **puntos totales** de tu estrategia contra los de cada modelo:
+
+- **Si tus puntos totales ≥ puntos totales del modelo → lo venciste.**
+- **Si tus puntos totales < puntos totales del modelo → no lo venciste.**
+- **Empate (mismos puntos) = lo venciste** (el empate favorece al estudiante).
+
+#### Paso 4: Se calcula tu calificacion
+
+Tu calificacion se basa en **cuantos modelos venciste**, no en cuales especificamente:
+
+| Modelos vencidos | Calificacion | Ejemplo |
+|------------------|-------------|---------|
+| **0** | **0** | No venciste a ninguno |
+| **1** | **5** | Venciste a 1 modelo (probablemente Random) |
+| **2** | **6** | Venciste a 2 modelos |
+| **3** | **7** | Venciste a 3 modelos |
+| **4** | **8** | Venciste a 4 modelos |
+| **5** | **9** | Venciste a 5 modelos |
+| **6** | **10** | Venciste a todos los modelos |
+
+**Formula**: `calificacion = 4 + cantidad_de_modelos_vencidos` (si venciste al menos 1; si no venciste a ninguno, es 0).
+
+**Excepcion**: Los **top 3** estudiantes por puntos totales obtienen automaticamente **10 puntos** (requiere minimo 3 estudiantes).
+
+### 6 modelos de referencia
+
+| Modelo | Dificultad |
+|--------|------------|
+| **Random** | Trivial — juega al azar |
+| **MCTS_Tier_1** | Facil |
+| **MCTS_Tier_2** | Media |
+| **MCTS_Tier_3** | Dificil |
+| **MCTS_Tier_4** | Muy dificil |
+| **MCTS_Tier_5** | Experto |
+
+Los algoritmos son **opacos** — binarios compilados cuyo codigo no puedes ver. Solo puedes estudiar su comportamiento jugando contra ellos.
+
+**Nota sobre el conteo**: Como la calificacion se basa en la **cantidad** de modelos vencidos (no en sus nombres), no importa si un modelo facil termina con mas puntos que uno dificil. Si MCTS_Tier_4 le gana a MCTS_Tier_5 en el torneo, ambos siguen contando como un modelo vencido cada uno.
+
+### Ejemplo completo
+
+Supongamos un torneo con 1 estudiante y los 6 modelos. Cada par juega 4 partidas en classic + 4 en dark. Standings finales:
+
+```
+  LIGA CLASSIC                    LIGA DARK
+  Rank  Estrategia     Pts       Rank  Estrategia     Pts
+  ──────────────────────────      ──────────────────────────
+   1    MCTS_Tier_5     30        1    MCTS_Tier_5     28
+   2    Tu_equipo       25        2    Tu_equipo       26
+   3    MCTS_Tier_4     24        3    MCTS_Tier_4     25
+   4    MCTS_Tier_3     20        4    MCTS_Tier_3     18
+   5    MCTS_Tier_2     15        5    MCTS_Tier_2     14
+   6    MCTS_Tier_1     10        6    MCTS_Tier_1      9
+   7    Random           3        7    Random           2
+
+  STANDINGS COMBINADOS
+  Estrategia        Classic  Dark  Total
+  ──────────────────────────────────────
+  MCTS_Tier_5          30     28     58
+  Tu_equipo            25     26     51   ← tus puntos totales
+  MCTS_Tier_4          24     25     49
+  MCTS_Tier_3          20     18     38
+  MCTS_Tier_2          15     14     29
+  MCTS_Tier_1          10      9     19
+  Random                3      2      5
+```
+
+**Calculo**:
+1. Tus puntos totales: **51** (25 classic + 26 dark)
+2. Comparas contra cada modelo:
+   - Random (5 pts total): 51 ≥ 5 → **vencido**
+   - MCTS_Tier_1 (19 pts total): 51 ≥ 19 → **vencido**
+   - MCTS_Tier_2 (29 pts total): 51 ≥ 29 → **vencido**
+   - MCTS_Tier_3 (38 pts total): 51 ≥ 38 → **vencido**
+   - MCTS_Tier_4 (49 pts total): 51 ≥ 49 → **vencido**
+   - MCTS_Tier_5 (58 pts total): 51 < 58 → **no vencido**
+3. Modelos vencidos: **5**
+4. Calificacion: 4 + 5 = **9**
+
+### Resumen rapido
+
+| Lo que cuenta | Detalle |
+|---------------|---------|
+| **Que se juega** | Liga round-robin, classic + dark, 4 partidas/par/variante |
+| **Que se mide** | Puntos totales (victorias classic + victorias dark) |
+| **Que se compara** | Tus puntos totales vs los de cada modelo |
+| **Condicion de victoria** | Tus pts ≥ pts del modelo (empate = vences) |
+| **Calificacion** | 0 modelos = 0, luego 4 + N modelos vencidos (max 10) |
+| **Excepcion** | Top 3 estudiantes = 10 automatico |
+
+Para las reglas completas del juego, restricciones de recursos y criterios de descalificacion, consulta **[docs/rules.md](docs/rules.md)**.
+
+---
+
+## Entrega
+
+```bash
+git add estudiantes/mi_equipo/strategy.py estudiantes/mi_equipo/README.md
 git commit -m "add strategy mi_equipo"
 git push origin mi_equipo
 ```
@@ -133,227 +213,20 @@ git push origin mi_equipo
 Abre un **Pull Request** de tu branch hacia `main`.
 
 **Tu PR debe contener:**
-- `estudiantes/<tu_equipo>/strategy.py` — esto es lo **unico obligatorio**
+- `estudiantes/<tu_equipo>/strategy.py` — **obligatorio** (se evalua automaticamente)
+- `estudiantes/<tu_equipo>/README.md` — **obligatorio** (documenta tu estrategia)
 - Opcionalmente: notebooks, scripts, datos en tu directorio (no seran evaluados)
+
+**Tu `README.md` debe explicar:**
+- Que algoritmo(s) usaste (MCTS, minimax, heuristicas, etc.)
+- Como maneja tu estrategia la variante dark (fog of war)
+- Decisiones de diseno importantes y por que las tomaste
+- Resultados de pruebas locales (contra que tiers lograste ganar)
 
 **NO incluyas:**
 - Cambios a archivos fuera de `estudiantes/<tu_equipo>/`
 - Archivos grandes (`.pkl`, `.npy`, modelos)
 - Resultados (`results/`)
-
----
-
-## Solo se evalua `strategy.py`
-
-El framework importa **unicamente** `estudiantes/<equipo>/strategy.py`. Todo tu codigo debe estar en ese archivo: una sola clase que hereda de `Strategy`.
-
-Puedes tener otros archivos en tu directorio para desarrollo (notebooks, scripts, tablas), pero **no seran accesibles durante la evaluacion**.
-
----
-
-## Que informacion recibe tu estrategia
-
-### `begin_game(config: GameConfig)`
-
-| Campo | Tipo | Descripcion |
-|-------|------|-------------|
-| `config.board_size` | `int` | Lado del tablero (11) |
-| `config.variant` | `str` | `"classic"` o `"dark"` |
-| `config.initial_board` | `tuple[tuple[int,...],...]` | Tablero inicial (en dark, solo tus piedras) |
-| `config.player` | `int` | Tu jugador: 1 (Negro) o 2 (Blanco) |
-| `config.opponent` | `int` | Numero del oponente |
-| `config.time_limit` | `float` | Segundos maximos por jugada |
-
-### `play(board, last_move) -> (row, col)`
-
-- `board[r][c]`: 0=vacio, 1=Negro, 2=Blanco
-- `last_move`: `(row, col)` del oponente, o `None` (siempre `None` en dark)
-- Devuelve `(row, col)` de una celda vacia
-
-### `on_move_result(move, success)`
-
-- `success=True`: tu piedra se coloco
-- `success=False`: colision (dark mode) — la celda tenia una piedra oculta del oponente
-
----
-
-## Calificacion
-
-### 6 niveles de dificultad
-
-| Tier | Dificultad | Puntos si ganas |
-|------|------------|-----------------|
-| **Random** | Trivial | **5** |
-| **MCTS_Tier_1** | Facil | **6** |
-| **MCTS_Tier_2** | Media | **7** |
-| **MCTS_Tier_3** | Dificil | **8** |
-| **MCTS_Tier_4** | Muy dificil | **9** |
-| **MCTS_Tier_5** | Experto | **10** |
-
-Los algoritmos de cada tier son **opacos** — binarios compilados cuyo codigo no puedes ver. Solo puedes estudiar su comportamiento jugando contra ellos.
-
-### Como se calcula tu calificacion
-
-1. Tu estrategia juega contra cada tier en **ambas variantes** (classic + dark), alternando colores.
-2. Para "ganar" contra un tier necesitas ganar la **mayoria** de las partidas combinando ambas variantes.
-3. **Tu calificacion = puntos del tier mas alto que vences.**
-4. Los **top 3** estudiantes por total de victorias obtienen automaticamente **10 puntos**.
-
-| Resultado | Calificacion |
-|-----------|-------------|
-| No ganas contra nadie | **0** |
-| Ganas contra Random | **5** |
-| Ganas contra MCTS_Tier_1 | **6** |
-| Ganas contra MCTS_Tier_2 | **7** |
-| Ganas contra MCTS_Tier_3 | **8** |
-| Ganas contra MCTS_Tier_4 | **9** |
-| Ganas contra MCTS_Tier_5 **o** eres top 3 | **10** |
-
----
-
-## Restricciones de recursos
-
-| Recurso | Limite | Detalle |
-|---------|--------|---------|
-| **Tiempo** | **15 segundos por jugada** | Estricto via `signal.SIGALRM`. Exceder = pierdes esa partida. |
-| **CPU** | **4 cores** | Enforzado via Docker |
-| **Memoria** | **8 GB** | Enforzado via Docker + `resource.setrlimit` |
-| **Dependencias** | Solo `numpy` + stdlib | No instales ni importes nada mas |
-
-**Presupuesto de tiempo:**
-- `begin_game()` **no** consume tu presupuesto — solo se mide `play()`.
-- 15 segundos por movimiento. Un juego de ~60 movimientos (~30 por jugador) = ~7.5 minutos maximo por partida.
-- Si usas MCTS, controla con `time.monotonic()`:
-  ```python
-  import time
-  t0 = time.monotonic()
-  while time.monotonic() - t0 < self._time_limit * 0.9:
-      # una iteracion de MCTS
-      ...
-  ```
-
----
-
-## Comandos Docker (recomendado)
-
-Los tiers MCTS son binarios compilados que **solo funcionan dentro de Docker**. Usa siempre Docker para pruebas contra tiers.
-
-### Torneo
-
-```bash
-# Torneo oficial (ambas variantes, 5 games/pair)
-docker compose up tournament
-
-# Evaluacion real (10 games/pair, ambas variantes)
-docker compose up real-tournament
-
-# Solo tu equipo vs todos los defaults
-TEAM=mi_equipo docker compose up team-tournament
-```
-
-### Experimento individual
-
-```bash
-# Tu estrategia contra un tier especifico (via env vars)
-BLACK=MiEstrategia_mi_equipo WHITE=MCTS_Tier_3 docker compose run experiment
-
-# Variante dark
-BLACK=MiEstrategia_mi_equipo WHITE=MCTS_Tier_4 VARIANT=dark docker compose run experiment
-
-# O con el comando directo (mas flexible)
-docker compose run experiment \
-  python experiment.py --black "MiEstrategia_mi_equipo" --white "MCTS_Tier_3" \
-  --num-games 5 --verbose
-```
-
-### Sin Docker (solo Random)
-
-```bash
-# Contra Random (no necesita Docker)
-python3 experiment.py --black "MiEstrategia_mi_equipo" --white "Random" --num-games 5 --verbose
-
-# Torneo rapido (solo Random disponible sin Docker)
-python3 run_all.py
-```
-
-### Opciones de `run_all.py`
-
-```bash
-python3 run_all.py                          # rapido (classic, 3 games/pair)
-python3 run_all.py --official               # ambas variantes, 5 games/pair
-python3 run_all.py --team mi_equipo         # solo tu equipo vs defaults
-python3 run_all.py --real                   # evaluacion (10 games/pair)
-python3 run_all.py --real --num-games 20    # evaluacion, 20 games/pair
-```
-
----
-
-## Errores comunes
-
-### Tu estrategia no aparece
-- Verifica: `estudiantes/<tu_equipo>/strategy.py` (nombre exacto).
-- Tu clase debe heredar de `Strategy`.
-- El directorio **no** debe empezar con `_`.
-
-### Timeout
-- El timeout es **estricto**: si `play()` tarda mas de 15 segundos, pierdes esa partida.
-- Usa `time.monotonic()` para controlar tu presupuesto (deja un margen de ~10%).
-
-### Movimiento invalido
-- `play()` debe devolver `(row, col)` de una celda vacia.
-- Celda ocupada o fuera de rango = pierdes la partida.
-
-### Funciona en classic pero falla en dark
-- En dark **solo ves tus piedras** + las descubiertas por colision.
-- `last_move` es siempre `None`.
-- Implementa `on_move_result()` para rastrear colisiones.
-- Las celdas "vacias" pueden tener piedras ocultas.
-- **Prueba ambas variantes antes de entregar.**
-
-### Los tiers MCTS no cargan
-- Los tiers MCTS son binarios `.so` compilados para Linux x86_64.
-- **Solo funcionan dentro de Docker.** Si corres fuera de Docker, solo Random estara disponible.
-- Usa `docker compose run experiment ...` para probar contra tiers.
-
-### ImportError
-- Solo `numpy` + stdlib. No importes `scipy`, `pandas`, `sklearn`, etc.
-- Puedes importar: `from strategy import Strategy, GameConfig` y funciones de `hex_game`.
-
----
-
-## Utilidades disponibles
-
-```python
-from hex_game import (
-    get_neighbors,          # (r, c, size) -> [(nr, nc), ...]
-    check_winner,           # (board, size) -> 0, 1, or 2
-    shortest_path_distance, # (board, size, player) -> int (Dijkstra)
-    empty_cells,            # (board, size) -> [(r, c), ...]
-    render_board,           # (board, size) -> str
-    NEIGHBORS,              # [(-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0)]
-)
-```
-
-**Ejemplos:**
-```python
-dist = shortest_path_distance(board, 11, player=1)     # distancia Dijkstra
-nbrs = get_neighbors(3, 5, 11)                          # vecinos de (3,5)
-winner = check_winner(board, 11)                         # 0=nadie, 1=Negro, 2=Blanco
-```
-
----
-
-## Ideas para tu estrategia
-
-1. **MCTS basico** — Monte Carlo Tree Search con UCT. Usa `time.monotonic()` para el presupuesto.
-2. **Rollouts informados** — En vez de rollouts aleatorios, sesga hacia celdas que reducen tu distancia mas corta.
-3. **Heuristica dual** — Combina tu `shortest_path_distance` con la del oponente.
-4. **Puentes virtuales** — Dos piedras separadas por un gap que el oponente no puede bloquear. Prioriza completarlos.
-5. **Early cutoff** — Corta rollouts antes del final y evalua con heuristica de distancia.
-6. **Transposition table** — Guarda posiciones evaluadas para reutilizar entre iteraciones.
-7. **Determinizacion (dark)** — Estima piedras ocultas del oponente, colocalas aleatoriamente, corre MCTS sobre ese "mundo posible".
-8. **ISMCTS (dark)** — Information Set MCTS: mantiene un arbol sobre conjuntos de informacion.
-9. **Exploracion de colisiones (dark)** — Colisionar revela informacion. Juega deliberadamente donde sospechas piedras ocultas.
 
 ---
 
@@ -364,18 +237,25 @@ ia_p26_hex_tournament/
 ├── run_all.py              # Un comando para todo
 ├── strategy.py             # Clase base Strategy + GameConfig
 ├── hex_game.py             # Motor del juego (tablero, BFS, Dijkstra)
-├── tournament.py           # Torneo paralelo con calificaciones
+├── referee.py              # Referee con aislamiento de procesos
+├── strategy_worker.py      # Subprocess que ejecuta cada estrategia
+├── tournament.py           # Torneo liga con calificaciones
 ├── experiment.py           # Pruebas individuales (verbose)
 ├── strategies/             # Defaults compilados
-│   ├── random_strat.py     #   Random (unico .py, funciona sin Docker)
+│   ├── random_strat.py     #   Random (unico .py, LEELO como referencia)
 │   └── mcts_tier_*_strat.*.so  #   MCTS_Tier_1..5 (binarios, solo Docker)
 ├── estudiantes/            # <-- AQUI VA TU ESTRATEGIA
 │   ├── _template/          #     Template para copiar
 │   └── <tu-equipo>/
-│       └── strategy.py     #     Tu estrategia (UNICO archivo evaluado)
+│       ├── strategy.py     #     Tu estrategia (UNICO archivo evaluado)
+│       └── README.md       #     Tu documentacion (obligatorio)
+├── docs/
+│   ├── team_guide.md       #     Guia paso a paso para equipos
+│   └── rules.md            #     Reglas del torneo
 ├── results/                # Salidas del torneo
-│   ├── runs/<timestamp>/   #     Historial
-│   └── latest.json         #     Ultimo torneo
+│   ├── runs/<timestamp>/   #     Resultados completos por ejecucion
+│   ├── latest -> runs/...  #     Symlink al mas reciente
+│   └── history.jsonl       #     Historial de ejecuciones
 ├── Dockerfile
 ├── docker-compose.yaml
 └── requirements.txt
@@ -387,7 +267,13 @@ ia_p26_hex_tournament/
 
 | Archivo | Descripcion |
 |---------|-------------|
-| `results/runs/<timestamp>/tournament_results.json` | Datos completos del torneo |
-| `results/latest.json` | Copia del ultimo torneo |
-| `results/tournament_official.csv` | CSV partida por partida |
-| `estudiantes/<equipo>/results/` | Resultados locales de tu equipo |
+| `results/runs/<timestamp>/config.json` | Parametros del torneo |
+| `results/runs/<timestamp>/games.jsonl` | Una linea JSON por partida (con move log completo) |
+| `results/runs/<timestamp>/classic_league.json` | Standings liga classic |
+| `results/runs/<timestamp>/dark_league.json` | Standings liga dark |
+| `results/runs/<timestamp>/combined_standings.json` | Standings combinados |
+| `results/runs/<timestamp>/grades.json` | Calificaciones (JSON) |
+| `results/runs/<timestamp>/grades.csv` | Calificaciones (CSV para spreadsheet) |
+| `results/runs/<timestamp>/summary.txt` | Resumen legible |
+| `results/latest` | Symlink al mas reciente |
+| `results/history.jsonl` | Historial de ejecuciones |

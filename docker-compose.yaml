@@ -1,10 +1,10 @@
 services:
-  # ── Official tournament (both variants) ──
+  # ── Official tournament (both variants, league format) ──
   tournament:
     build: .
     command: >
       python tournament.py --official
-        --num-games ${NUM_GAMES:-5}
+        --num-games ${NUM_GAMES:-4}
         --move-timeout ${MOVE_TIMEOUT:-15}
         --board-size ${BOARD_SIZE:-11}
     volumes:
@@ -43,7 +43,7 @@ services:
         --white ${WHITE:-Random}
         --board-size ${BOARD_SIZE:-11}
         --variant ${VARIANT:-classic}
-        --num-games ${NUM_GAMES:-5}
+        --num-games ${NUM_GAMES:-4}
         --move-timeout ${MOVE_TIMEOUT:-15}
         --verbose
     volumes:
@@ -62,10 +62,10 @@ services:
       python tournament.py
         --team ${TEAM:-_template}
         --official
-        --num-games ${NUM_GAMES:-5}
+        --num-games ${NUM_GAMES:-4}
         --move-timeout ${MOVE_TIMEOUT:-15}
-        --json estudiantes/${TEAM:-_template}/results/tournament_results.json
     volumes:
+      - ./results:/app/results
       - ./estudiantes:/app/estudiantes
     deploy:
       resources:

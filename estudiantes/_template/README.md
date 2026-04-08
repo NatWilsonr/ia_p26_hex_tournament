@@ -1,62 +1,96 @@
 # Team Template
 
-Copy this directory to create your team workspace:
+Copia este directorio para crear tu equipo:
 
 ```bash
-cp -r estudiantes/_template estudiantes/your_team_name
+cp -r estudiantes/_template estudiantes/nombre_de_tu_equipo
 ```
 
-## Directory Structure
+## Estructura
 
 ```
-estudiantes/your_team_name/
-    strategy.py          # YOUR STRATEGY (this is what gets submitted)
-    results/             # Auto-created: experiment and tournament outputs
-    ...                  # Anything else you want (notebooks, scripts, data)
+estudiantes/nombre_de_tu_equipo/
+    strategy.py      # <-- UNICO ARCHIVO EVALUADO (todo tu codigo aqui)
+    README.md        # <-- OBLIGATORIO (reemplaza este con tu documentacion)
+    ...              # Agrega lo que necesites (notebooks, scripts, datos)
 ```
 
-## Quick Start
+## Inicio rapido
 
-1. **Edit** `strategy.py` — change the class name, the `name` property, and implement `play()`.
+1. **Estudia** `strategies/random_strat.py` — es la unica estrategia con codigo fuente visible. Todos los tiers MCTS son binarios compilados `.so` cuyo codigo no puedes ver. Random es tu punto de partida y tu piso minimo.
 
-2. **Test** your strategy against Random:
+2. **Edita** `strategy.py` — cambia el nombre de la clase, la propiedad `name`, e implementa `play()`.
+
+3. **Prueba** contra Random (sin Docker):
    ```bash
-   python experiment.py --black "YourName_teamname" --white "Random" --num-games 5 --verbose
+   python3 experiment.py --black "TuNombre_equipo" --white "Random" --num-games 5 --verbose
    ```
 
-3. **Compare** against all defaults (Random + MCTS_Tier_1..5, requires Docker):
+4. **Prueba** contra tiers MCTS (requiere Docker):
    ```bash
-   docker compose run team-tournament
+   docker compose run experiment \
+     python experiment.py --black "TuNombre_equipo" --white "MCTS_Tier_3" \
+     --num-games 5 --verbose
    ```
 
-4. **Run specific configurations:**
+5. **Corre un torneo completo** (tu equipo vs todos los defaults):
    ```bash
-   # Against a specific tier (requires Docker for MCTS tiers)
-   docker compose run experiment --black "YourName_teamname" --white "MCTS_Tier_3" --variant dark --verbose
-
-   # Full local tournament (both variants)
-   docker compose run team-tournament
+   TEAM=nombre_de_tu_equipo docker compose up team-tournament
    ```
 
-## Rules
+6. **Documenta** tu estrategia reemplazando este README.
 
-- Your strategy must work for **both** variants: `classic` and `dark` (fog of war).
-- **15 seconds** max per move (strict timeout — exceeding it = forfeit that game).
-- **4 CPU cores** during tournament.
-- **8 GB** memory limit per match.
-- Only `numpy` + standard library allowed (no extra dependencies).
-- No ML/RL pre-trained models. MCTS, minimax, heuristics, simulations are all allowed.
-- The `name` property must be unique: `"StrategyName_teamname"`.
+7. **Entrega** via Pull Request.
 
-## Useful Utilities
+## Tu README debe explicar
+
+**Reemplaza este archivo** con tu propia documentacion. Debe incluir:
+
+- **Algoritmo**: que tecnica(s) usaste (MCTS, minimax, heuristicas, etc.)
+- **Dark mode**: como maneja tu estrategia el fog of war (determinizacion, ISMCTS, tracking de colisiones, etc.)
+- **Decisiones de diseno**: que trade-offs hiciste y por que
+- **Resultados**: contra que tiers lograste ganar en tus pruebas locales
+
+## Reglas
+
+- Tu estrategia debe funcionar para **ambas** variantes: `classic` y `dark` (fog of war).
+- **15 segundos** max por jugada (timeout estricto — exceder = turno saltado, no pierdes la partida).
+- **8 GB** de memoria, **numpy + stdlib** unicamente.
+- El `name` debe ser unico: `"NombreEstrategia_nombreequipo"`.
+- Tu estrategia corre en un **proceso separado** — no puedes acceder al motor del juego ni al oponente.
+
+## Calificacion
+
+Tu calificacion depende de cuantos de los 6 modelos de referencia vences en los standings combinados (classic + dark):
+
+| Modelos vencidos | Calificacion |
+|------------------|-------------|
+| 0 | 0 |
+| 1 | 5 |
+| 2 | 6 |
+| 3 | 7 |
+| 4 | 8 |
+| 5 | 9 |
+| 6 | 10 |
+
+"Vencer" = tus puntos totales ≥ puntos totales del modelo (empate te favorece).
+Top 3 estudiantes por puntos totales = 10 automatico.
+
+## Documentacion completa
+
+- **[Guia para equipos](../../docs/team_guide.md)** — paso a paso detallado
+- **[Reglas del torneo](../../docs/rules.md)** — mecanica, restricciones, juego limpio
+- **[README principal](../../README.md)** — overview, calificacion con ejemplo, estructura del repo
+
+## Utilidades disponibles
 
 ```python
 from hex_game import (
-    get_neighbors,          # (r, c, size) -> list of neighbor cells
-    check_winner,           # (board, size) -> 0, 1, or 2
+    get_neighbors,          # (r, c, size) -> lista de vecinos
+    check_winner,           # (board, size) -> 0, 1, o 2
     shortest_path_distance, # (board, size, player) -> int (Dijkstra)
-    empty_cells,            # (board, size) -> list of (r, c)
-    render_board,           # (board, size) -> str (text visualization)
+    empty_cells,            # (board, size) -> [(r, c), ...]
+    render_board,           # (board, size) -> str
     NEIGHBORS,              # [(-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0)]
 )
 ```

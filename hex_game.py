@@ -192,21 +192,27 @@ class HexGame:
         Random seed (used for any variant-specific randomness).
     """
 
+    # Default move caps per variant
+    DEFAULT_MAX_MOVES = {"classic": 122, "dark": 363}
+
     def __init__(
         self,
         size: int = 11,
         variant: str = "classic",
         seed: int | None = None,
+        max_moves: int | None = None,
     ) -> None:
         self._size = size
         self._variant = variant
         self._rng = random.Random(seed)
+        self._max_moves = max_moves or self.DEFAULT_MAX_MOVES.get(variant, size * size + 1)
 
         self._board = make_board(size)
         self._initial_board = board_to_tuple(self._board)
         self._current_player = 1  # Black moves first
         self._winner = 0
         self._move_count = 0
+        self._skip_count: dict[int, int] = {1: 0, 2: 0}
         self._last_move: tuple[int, int] | None = None
         self._last_collision: tuple[int, int] | None = None
         self._history: list[tuple[int, tuple[int, int], bool]] = []
@@ -252,7 +258,11 @@ class HexGame:
 
     @property
     def is_over(self) -> bool:
-        return self._winner != 0 or len(empty_cells(self._board, self._size)) == 0
+        return (
+            self._winner != 0
+            or self._move_count >= self._max_moves
+            or len(empty_cells(self._board, self._size)) == 0
+        )
 
     @property
     def last_move(self) -> tuple[int, int] | None:
@@ -267,6 +277,15 @@ class HexGame:
     @property
     def move_count(self) -> int:
         return self._move_count
+
+    @property
+    def max_moves(self) -> int:
+        return self._max_moves
+
+    @property
+    def skip_count(self) -> dict[int, int]:
+        """Number of skipped turns per player."""
+        return dict(self._skip_count)
 
     @property
     def history(self) -> list[tuple[int, tuple[int, int], bool]]:
@@ -330,6 +349,21 @@ class HexGame:
         else:
             return self._play_classic(row, col, player)
 
+    def _tiebreak_winner(self, last_player: int) -> int:
+        """Determine winner by shortest_path_distance when move cap is hit.
+
+        The player with the shorter remaining distance wins.
+        If equal, the player who moved last (*last_player*) loses.
+        """
+        d1 = shortest_path_distance(self._board, self._size, 1)
+        d2 = shortest_path_distance(self._board, self._size, 2)
+        if d1 < d2:
+            return 1
+        if d2 < d1:
+            return 2
+        # Equal distance: last mover loses
+        return 3 - last_player
+
     def _play_classic(
         self, row: int, col: int, player: int,
     ) -> tuple[int, bool]:
@@ -343,6 +377,8 @@ class HexGame:
         self._move_count += 1
 
         self._winner = check_winner(self._board, self._size)
+        if self._winner == 0 and self._move_count >= self._max_moves:
+            self._winner = self._tiebreak_winner(player)
         if self._winner == 0:
             self._current_player = 3 - player
         return (self._winner, False)
@@ -369,6 +405,9 @@ class HexGame:
             self._last_collision = (row, col)
             self._history.append((player, (row, col), True))
             self._move_count += 1
+            if self._move_count >= self._max_moves:
+                self._winner = self._tiebreak_winner(player)
+                return (self._winner, True)
             self._current_player = opponent  # turn passes
             return (0, True)
 
@@ -381,9 +420,37 @@ class HexGame:
         self._move_count += 1
 
         self._winner = check_winner(self._board, self._size)
+        if self._winner == 0 and self._move_count >= self._max_moves:
+            self._winner = self._tiebreak_winner(player)
         if self._winner == 0:
             self._current_player = opponent
         return (self._winner, False)
+
+    def skip_turn(self) -> int:
+        """Skip the current player's turn without placing a stone.
+
+        The move counter increments and the turn passes to the opponent.
+        Used by the referee when a strategy times out, crashes, or
+        returns an invalid move.
+
+        Returns
+        -------
+        int
+            The winner (1 or 2) if the move cap is reached, else 0.
+        """
+        if self.is_over:
+            raise RuntimeError("Game is already over")
+
+        player = self._current_player
+        self._skip_count[player] += 1
+        self._move_count += 1
+
+        if self._move_count >= self._max_moves:
+            self._winner = self._tiebreak_winner(player)
+            return self._winner
+
+        self._current_player = 3 - player
+        return 0
 
     def legal_moves(self) -> list[tuple[int, int]]:
         """Return all truly legal moves (empty cells on real board)."""

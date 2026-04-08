@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Run head-to-head Hex tournament between discovered strategies.
+"""Run head-to-head Hex tournament with league scoring.
 
 Features:
-  - Auto-discovers built-in strategies AND student submissions.
-  - Runs matches in parallel (one process per match).
-  - Supports two variants: ``classic`` and ``dark`` (fog of war).
-  - Per-move timeout enforcement via ``signal.SIGALRM``.
-  - Threshold scoring: 0 / 6 / 8 / 10 based on which defaults you beat.
-  - Outputs summary tables, CSV, and JSON.
+  - Separate-process referee (unhackable isolation via JSON pipes).
+  - Two leagues: classic + dark, combined standings.
+  - 4 games per pair per variant (2 as Black, 2 as White).
+  - Win=1, Loss=0 scoring. Top 3 students by total pts → auto 10.
+  - Count-based grading: grade = 4 + N models beaten (0 if none).
+  - JSONL persistence, config, grades CSV/JSON.
 """
 
 from __future__ import annotations
@@ -15,17 +15,21 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import random
 import sys
 import time as _time_mod
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from referee import run_match_referee, MatchRecord
+
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
-# Default baselines in difficulty order (must match strategy names)
+# Default baselines in difficulty order
 DEFAULT_TIERS = [
     "Random",
     "MCTS_Tier_1",
@@ -34,326 +38,268 @@ DEFAULT_TIERS = [
     "MCTS_Tier_4",
     "MCTS_Tier_5",
 ]
-TIER_SCORES = {
-    "Random": 5,
-    "MCTS_Tier_1": 6,
-    "MCTS_Tier_2": 7,
-    "MCTS_Tier_3": 8,
-    "MCTS_Tier_4": 9,
-    "MCTS_Tier_5": 10,
-}
-
 
 # ------------------------------------------------------------------
-# Result containers
+# League table computation
 # ------------------------------------------------------------------
 
 @dataclass
-class MatchResult:
-    """Result of a single game between two strategies."""
-    black_strategy: str
-    white_strategy: str
-    winner_strategy: str
-    winner_color: int  # 1=Black, 2=White
-    variant: str
-    board_size: int
-    num_moves: int
-    black_timed_out: bool = False
-    white_timed_out: bool = False
+class LeagueEntry:
+    strategy: str
+    wins: int = 0
+    losses: int = 0
+    points: int = 0
+    rank: int = 0
+
+
+def compute_league_table(
+    matches: list[MatchRecord],
+    variant: str,
+) -> list[LeagueEntry]:
+    """Compute league standings for a single variant."""
+    wins: dict[str, int] = defaultdict(int)
+    losses: dict[str, int] = defaultdict(int)
+    strategies: set[str] = set()
+
+    for m in matches:
+        if m.variant != variant:
+            continue
+        strategies.add(m.black_strategy)
+        strategies.add(m.white_strategy)
+        wins[m.winner_strategy] += 1
+        loser = m.white_strategy if m.winner_strategy == m.black_strategy else m.black_strategy
+        losses[loser] += 1
+
+    entries = []
+    for s in sorted(strategies):
+        entries.append(LeagueEntry(
+            strategy=s,
+            wins=wins[s],
+            losses=losses[s],
+            points=wins[s],
+        ))
+
+    # Sort by points descending
+    entries.sort(key=lambda e: -e.points)
+    for i, e in enumerate(entries):
+        e.rank = i + 1
+
+    return entries
 
 
 @dataclass
-class TournamentResults:
-    matches: list[MatchResult] = field(default_factory=list)
+class CombinedEntry:
+    strategy: str
+    classic_pts: int = 0
+    dark_pts: int = 0
+    total_pts: int = 0
+    classic_rank: int = 0
+    dark_rank: int = 0
+    avg_rank: float = 0.0
 
-    def to_csv(self, path: str | Path) -> None:
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "black_strategy", "white_strategy", "winner_strategy",
-                "winner_color", "variant", "board_size", "num_moves",
-                "black_timed_out", "white_timed_out",
-            ])
-            for m in self.matches:
-                writer.writerow([
-                    m.black_strategy, m.white_strategy, m.winner_strategy,
-                    m.winner_color, m.variant, m.board_size, m.num_moves,
-                    int(m.black_timed_out), int(m.white_timed_out),
-                ])
 
-    def print_summary(self) -> None:
-        from collections import defaultdict
+def compute_combined_standings(
+    classic_table: list[LeagueEntry],
+    dark_table: list[LeagueEntry],
+) -> list[CombinedEntry]:
+    """Merge classic and dark leagues into combined standings."""
+    classic_map = {e.strategy: e for e in classic_table}
+    dark_map = {e.strategy: e for e in dark_table}
+    all_strats = set(classic_map.keys()) | set(dark_map.keys())
 
-        # Win counts per strategy
-        wins: dict[str, int] = defaultdict(int)
-        losses: dict[str, int] = defaultdict(int)
-        games: dict[str, int] = defaultdict(int)
+    entries = []
+    for s in all_strats:
+        c = classic_map.get(s)
+        d = dark_map.get(s)
+        c_pts = c.points if c else 0
+        d_pts = d.points if d else 0
+        c_rank = c.rank if c else len(classic_table) + 1
+        d_rank = d.rank if d else len(dark_table) + 1
+        entries.append(CombinedEntry(
+            strategy=s,
+            classic_pts=c_pts,
+            dark_pts=d_pts,
+            total_pts=c_pts + d_pts,
+            classic_rank=c_rank,
+            dark_rank=d_rank,
+            avg_rank=(c_rank + d_rank) / 2.0,
+        ))
 
-        for m in self.matches:
-            games[m.black_strategy] += 1
-            games[m.white_strategy] += 1
-            wins[m.winner_strategy] += 1
-            loser = m.white_strategy if m.winner_strategy == m.black_strategy else m.black_strategy
-            losses[loser] += 1
-
-        all_strats = sorted(set(games.keys()))
-
-        print(f"\n{'Strategy':<25} {'Games':>6} {'Wins':>6} {'Losses':>7} {'Win%':>6}")
-        print("-" * 55)
-        ranking = sorted(all_strats, key=lambda s: -wins[s] / max(games[s], 1))
-        for name in ranking:
-            g = games[name]
-            w = wins[name]
-            l = losses[name]
-            rate = 100 * w / g if g else 0
-            print(f"{name:<25} {g:>6} {w:>6} {l:>7} {rate:>5.1f}%")
-        print()
-
-    def print_matchup_table(self) -> None:
-        """Print head-to-head results between each pair of strategies."""
-        from collections import defaultdict
-
-        # wins[a][b] = number of games a won against b
-        w: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        g: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-
-        for m in self.matches:
-            a, b = m.black_strategy, m.white_strategy
-            g[a][b] += 1
-            g[b][a] += 1
-            winner = m.winner_strategy
-            loser = b if winner == a else a
-            w[winner][loser] += 1
-
-        strats = sorted(set(s for pair in g.values() for s in pair) | set(g.keys()))
-
-        print(f"\n{'MATCHUP TABLE (wins / games)':^60}")
-        header = f"{'':20}" + "".join(f"{s[:12]:>14}" for s in strats)
-        print(header)
-        print("-" * len(header))
-        for a in strats:
-            row = f"{a[:19]:<20}"
-            for b in strats:
-                if a == b:
-                    row += f"{'---':>14}"
-                else:
-                    total = g[a].get(b, 0)
-                    won = w[a].get(b, 0)
-                    row += f"{f'{won}/{total}':>14}" if total > 0 else f"{'':>14}"
-            print(row)
-        print()
-
-    def to_json(self, path: str | Path) -> None:
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        data = {"matches": [asdict(m) for m in self.matches]}
-        p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Sort: total_pts desc, avg_rank asc
+    entries.sort(key=lambda e: (-e.total_pts, e.avg_rank))
+    return entries
 
 
 # ------------------------------------------------------------------
-# Worker: play a single game between two strategies
+# Grades: count-based + top-3 auto-10
 # ------------------------------------------------------------------
 
-def _apply_resource_limits(memory_mb: int = 8192) -> None:
-    """Set memory limit for the worker process."""
-    import resource as _resource
+def compute_grades(
+    combined: list[CombinedEntry],
+) -> list[dict]:
+    """Compute grades from league position.
 
-    mem_bytes = memory_mb * 1024 * 1024
-    try:
-        _resource.setrlimit(_resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-    except (ValueError, OSError):
-        try:
-            _resource.setrlimit(_resource.RLIMIT_DATA, (mem_bytes, mem_bytes))
-        except (ValueError, OSError):
-            pass
+    A student "beats" a model when their total_pts >= the model's total_pts
+    (tie = student gets the credit).  Grade = 5 for the first model beaten,
+    +1 for each additional model beaten (max 10 with 6 models).
+    Top 3 students by total pts → auto 10.
+    """
+    defaults_set = set(DEFAULT_TIERS)
+
+    # Get each model's total_pts from the combined standings
+    model_pts: dict[str, int] = {}
+    for e in combined:
+        if e.strategy in defaults_set:
+            model_pts[e.strategy] = e.total_pts
+
+    grades = []
+    for e in combined:
+        if e.strategy in defaults_set:
+            continue  # Only grade students
+
+        beaten = []
+        for tier in DEFAULT_TIERS:
+            tier_pts = model_pts.get(tier)
+            if tier_pts is not None and e.total_pts >= tier_pts:
+                beaten.append(tier)
+
+        n_beaten = len(beaten)
+        score = (4 + n_beaten) if n_beaten > 0 else 0
+
+        grades.append({
+            "strategy": e.strategy,
+            "score": score,
+            "beaten": beaten,
+            "total_wins": e.total_pts,
+            "league_rank": next(
+                (i + 1 for i, x in enumerate(combined) if x.strategy == e.strategy),
+                0,
+            ),
+        })
+
+    grades.sort(key=lambda x: (-x["score"], -x["total_wins"]))
+
+    # Auto-10: top 3 students by total pts (requires ≥3 students)
+    if len(grades) >= 3:
+        pts_values = sorted({g["total_wins"] for g in grades}, reverse=True)
+        top3_threshold = pts_values[min(2, len(pts_values) - 1)]
+        if top3_threshold > 0:
+            for g in grades:
+                if g["total_wins"] >= top3_threshold and g["score"] < 10:
+                    g["score"] = 10
+                    g["auto_10"] = True
+
+    grades.sort(key=lambda x: (-x["score"], -x["total_wins"]))
+    return grades
 
 
-def _run_match_worker(
+# ------------------------------------------------------------------
+# Printing
+# ------------------------------------------------------------------
+
+def print_league_table(table: list[LeagueEntry], variant: str) -> None:
+    print(f"\n{'='*55}")
+    print(f"  {variant.upper()} LEAGUE")
+    print(f"{'='*55}")
+    print(f"  {'Rank':>4}  {'Strategy':<25} {'Wins':>5} {'Losses':>6} {'Pts':>5}")
+    print(f"  {'-'*50}")
+    for e in table:
+        print(f"  {e.rank:>4}  {e.strategy:<25} {e.wins:>5} {e.losses:>6} {e.points:>5}")
+    print()
+
+
+def print_combined_standings(entries: list[CombinedEntry]) -> None:
+    print(f"\n{'='*80}")
+    print(f"  COMBINED STANDINGS")
+    print(f"{'='*80}")
+    print(f"  {'Strategy':<25} {'Classic':>7} {'Dark':>5} {'Total':>6} "
+          f"{'C.Rank':>7} {'D.Rank':>7} {'AvgRnk':>7}")
+    print(f"  {'-'*70}")
+    for e in entries:
+        print(f"  {e.strategy:<25} {e.classic_pts:>7} {e.dark_pts:>5} {e.total_pts:>6} "
+              f"{e.classic_rank:>7} {e.dark_rank:>7} {e.avg_rank:>7.1f}")
+    print()
+
+
+def print_grades(grades: list[dict]) -> None:
+    print(f"\n{'='*72}")
+    print(f"  GRADES (models beaten)")
+    print(f"{'='*72}")
+    print(f"  {'Strategy':<25}{'Score':>7}{'League Pts':>11}  Models beaten")
+    print(f"  {'-'*65}")
+    for g in grades:
+        beaten = ", ".join(g["beaten"]) if g["beaten"] else "none"
+        auto = " (auto-10: top 3)" if g.get("auto_10") else ""
+        print(f"  {g['strategy']:<25}{g['score']:>7}{g['total_wins']:>11}  {beaten}{auto}")
+    print()
+
+    top3 = [g for g in grades if g.get("auto_10")]
+    if top3:
+        print("  TOP 3 (auto-10):")
+        for i, g in enumerate(top3[:3]):
+            medal = ["#1", "#2", "#3"][i]
+            print(f"    {medal} {g['strategy']} — score: {g['score']}, "
+                  f"league pts: {g['total_wins']}")
+        print()
+
+
+def print_matchup_table(matches: list[MatchRecord], variant: str | None = None) -> None:
+    """Print head-to-head results."""
+    w: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    g: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for m in matches:
+        if variant and m.variant != variant:
+            continue
+        a, b = m.black_strategy, m.white_strategy
+        g[a][b] += 1
+        g[b][a] += 1
+        winner = m.winner_strategy
+        loser = b if winner == a else a
+        w[winner][loser] += 1
+
+    strats = sorted(set(s for pair in g.values() for s in pair) | set(g.keys()))
+    label = f" ({variant})" if variant else ""
+
+    print(f"\n{'MATCHUP TABLE' + label + ' (wins / games)':^60}")
+    header = f"{'':20}" + "".join(f"{s[:12]:>14}" for s in strats)
+    print(header)
+    print("-" * len(header))
+    for a in strats:
+        row = f"{a[:19]:<20}"
+        for b in strats:
+            if a == b:
+                row += f"{'---':>14}"
+            else:
+                total = g[a].get(b, 0)
+                won = w[a].get(b, 0)
+                row += f"{f'{won}/{total}':>14}" if total > 0 else f"{'':>14}"
+        print(row)
+    print()
+
+
+# ------------------------------------------------------------------
+# Match runner wrapper (for ProcessPoolExecutor)
+# ------------------------------------------------------------------
+
+def _run_referee_match(
     black_info: tuple[str, str],
     white_info: tuple[str, str],
     board_size: int,
     variant: str,
     seed: int,
-    move_timeout: float = 15.0,
-    memory_limit_mb: int = 8192,
-) -> MatchResult:
-    """Play one game between two strategies. Executed in a subprocess."""
-    import importlib
-    import importlib.util
-    import os
-    import signal as _signal
-    import sys as _sys
-    from pathlib import Path as _Path
-
-    # Apply resource limits
-    _apply_resource_limits(memory_limit_mb)
-
-    code_dir = str(_Path(__file__).resolve().parent)
-    if code_dir not in _sys.path:
-        _sys.path.insert(0, code_dir)
-
-    from strategy import Strategy as _Strategy, GameConfig
-    from hex_game import HexGame
-
-    def _load_strategy(info: tuple[str, str]) -> _Strategy:
-        source, cls_name = info
-        if source == "__builtin__":
-            from strategies import _discover_builtin
-            for cls in _discover_builtin():
-                if cls.__name__ == cls_name:
-                    return cls()
-            raise RuntimeError(f"Built-in strategy class {cls_name} not found")
-        else:
-            spec = importlib.util.spec_from_file_location(f"_worker_{cls_name}", source)
-            if spec is None or spec.loader is None:
-                raise RuntimeError(f"Cannot load {source}")
-            mod = importlib.util.module_from_spec(spec)
-            _sys.modules[spec.name] = mod
-            spec.loader.exec_module(mod)
-            for attr in dir(mod):
-                obj = getattr(mod, attr)
-                if (isinstance(obj, type) and issubclass(obj, _Strategy)
-                        and obj is not _Strategy and obj.__name__ == cls_name):
-                    return obj()
-            raise RuntimeError(f"Class {cls_name} not found in {source}")
-
-    black_strat = _load_strategy(black_info)
-    white_strat = _load_strategy(white_info)
-
-    # Create game
-    game = HexGame(
-        size=board_size,
+    move_timeout: float,
+    memory_limit_mb: int,
+) -> MatchRecord:
+    """Wrapper for run_match_referee to use with ProcessPoolExecutor."""
+    return run_match_referee(
+        black_info=black_info,
+        white_info=white_info,
+        board_size=board_size,
         variant=variant,
         seed=seed,
-    )
-
-    # Timeout handling
-    class _MoveTimeout(Exception):
-        pass
-
-    def _alarm_handler(signum, frame):
-        raise _MoveTimeout()
-
-    _signal.signal(_signal.SIGALRM, _alarm_handler)
-
-    is_dark = variant == "dark"
-
-    # Notify strategies — each player gets their own view
-    for strat, player_num in [(black_strat, 1), (white_strat, 2)]:
-        config = GameConfig(
-            board_size=board_size,
-            variant=variant,
-            initial_board=game.get_view(player_num),
-            player=player_num,
-            opponent=3 - player_num,
-            time_limit=move_timeout,
-        )
-        strat.begin_game(config)
-
-    black_timed_out = False
-    white_timed_out = False
-
-    # Track last successful move per player (for classic last_move)
-    last_successful: dict[int, tuple[int, int] | None] = {1: None, 2: None}
-
-    while not game.is_over:
-        current = game.current_player
-        opponent_num = 3 - current
-        strat = black_strat if current == 1 else white_strat
-
-        # Board view: in dark mode, player's view; in classic, full board
-        board_state = game.get_view(current)
-        # last_move: in dark mode, None (can't see opponent); in classic, opponent's last move
-        last = None if is_dark else last_successful.get(opponent_num)
-
-        timeout_secs = max(1, int(move_timeout + 1))
-        _signal.alarm(timeout_secs)
-        try:
-            move = strat.play(board_state, last)
-            _signal.alarm(0)
-        except _MoveTimeout:
-            _signal.alarm(0)
-            if current == 1:
-                black_timed_out = True
-                winner_color = 2
-                winner_name = white_strat.name
-            else:
-                white_timed_out = True
-                winner_color = 1
-                winner_name = black_strat.name
-            return MatchResult(
-                black_strategy=black_strat.name,
-                white_strategy=white_strat.name,
-                winner_strategy=winner_name,
-                winner_color=winner_color,
-                variant=variant,
-                board_size=board_size,
-                num_moves=game.move_count,
-                black_timed_out=black_timed_out,
-                white_timed_out=white_timed_out,
-            )
-        except Exception:
-            _signal.alarm(0)
-            if current == 1:
-                winner_color = 2
-                winner_name = white_strat.name
-            else:
-                winner_color = 1
-                winner_name = black_strat.name
-            return MatchResult(
-                black_strategy=black_strat.name,
-                white_strategy=white_strat.name,
-                winner_strategy=winner_name,
-                winner_color=winner_color,
-                variant=variant,
-                board_size=board_size,
-                num_moves=game.move_count,
-            )
-
-        try:
-            winner_result, collision = game.play(move[0], move[1])
-        except (ValueError, RuntimeError):
-            # Invalid move = forfeit (e.g., playing on own stone)
-            if current == 1:
-                winner_color = 2
-                winner_name = white_strat.name
-            else:
-                winner_color = 1
-                winner_name = black_strat.name
-            return MatchResult(
-                black_strategy=black_strat.name,
-                white_strategy=white_strat.name,
-                winner_strategy=winner_name,
-                winner_color=winner_color,
-                variant=variant,
-                board_size=board_size,
-                num_moves=game.move_count,
-            )
-
-        # Notify strategy of move result
-        strat.on_move_result(move, not collision)
-        if not collision:
-            last_successful[current] = move
-
-    # Game ended normally
-    winner_color = game.winner
-    winner_name = black_strat.name if winner_color == 1 else white_strat.name
-
-    # Notify strategies with FULL board (regardless of variant)
-    final_board = game.board
-    black_strat.end_game(final_board, winner_color, 1)
-    white_strat.end_game(final_board, winner_color, 2)
-
-    return MatchResult(
-        black_strategy=black_strat.name,
-        white_strategy=white_strat.name,
-        winner_strategy=winner_name,
-        winner_color=winner_color,
-        variant=variant,
-        board_size=board_size,
-        num_moves=game.move_count,
+        move_timeout=move_timeout,
+        memory_limit_mb=memory_limit_mb,
     )
 
 
@@ -365,51 +311,50 @@ def run_tournament(
     strategies_info: list[tuple[tuple[str, str], str]],
     board_size: int = 11,
     variant: str = "classic",
-    num_games: int = 5,
+    num_games: int = 4,
     seed: int = 42,
     max_workers: int | None = None,
     move_timeout: float = 15.0,
     memory_limit_mb: int = 8192,
     eval_mode: bool = False,
-) -> TournamentResults:
-    """Run a tournament.
+) -> list[MatchRecord]:
+    """Run a tournament for a single variant.
 
     Parameters
     ----------
     strategies_info : list
         Each element is ((source, class_name), display_name).
+    num_games : int
+        Games per pair (must be even for color balance).
     eval_mode : bool
         If True, only student strategies play against defaults.
-        If False, full round-robin (all pairs).
     """
-    import os as _os
+    if num_games % 2 != 0:
+        num_games += 1
+        print(f"  [Note] num_games adjusted to {num_games} (must be even for color balance)")
 
     rng = random.Random(seed)
 
     if max_workers is None:
-        max_workers = min(8, _os.cpu_count() or 4)
-
-    # Build match schedule
-    matches_to_run: list[tuple[tuple[str, str], str, tuple[str, str], str, int]] = []
-    # Each match: (info_a, name_a, info_b, name_b, game_seed)
+        max_workers = min(8, os.cpu_count() or 4)
 
     strat_by_name = {name: info for info, name in strategies_info}
 
     if eval_mode:
-        # Students vs defaults only
         defaults = {name for name in strat_by_name if name in DEFAULT_TIERS}
         students = {name for name in strat_by_name if name not in defaults}
         pairs = [(s, d) for s in students for d in defaults]
     else:
-        # Round robin: all unique pairs
         names = list(strat_by_name.keys())
         pairs = [(names[i], names[j]) for i in range(len(names)) for j in range(i + 1, len(names))]
 
+    # Build match schedule: 2 as Black + 2 as White per pair
+    matches_to_run = []
     for a_name, b_name in pairs:
         for game_idx in range(num_games):
             game_seed = rng.randint(0, 2**31)
-            # Alternate colors: even games a=Black, odd games a=White
-            if game_idx % 2 == 0:
+            half = num_games // 2
+            if game_idx < half:
                 black_name, white_name = a_name, b_name
             else:
                 black_name, white_name = b_name, a_name
@@ -425,16 +370,15 @@ def run_tournament(
           f"variant: {variant}, "
           f"board: {board_size}×{board_size}, "
           f"workers: {max_workers}, "
-          f"timeout: {move_timeout}s/move, "
-          f"memory: {memory_limit_mb}MB/match) ...", flush=True)
+          f"timeout: {move_timeout}s/move) ...", flush=True)
 
-    results = TournamentResults()
+    results: list[MatchRecord] = []
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
         for black_info, black_name, white_info, white_name, game_seed in matches_to_run:
             fut = executor.submit(
-                _run_match_worker,
+                _run_referee_match,
                 black_info,
                 white_info,
                 board_size,
@@ -451,17 +395,13 @@ def run_tournament(
             completed += 1
             try:
                 match_result = fut.result()
-                results.matches.append(match_result)
-                timeout_str = ""
-                if match_result.black_timed_out:
-                    timeout_str = " [Black TIMEOUT]"
-                elif match_result.white_timed_out:
-                    timeout_str = " [White TIMEOUT]"
+                results.append(match_result)
                 if completed % 10 == 0 or completed == total_matches:
                     print(f"  [{completed}/{total_matches}] "
                           f"{match_result.black_strategy} vs {match_result.white_strategy} → "
-                          f"{match_result.winner_strategy} wins ({match_result.num_moves} moves)"
-                          f"{timeout_str}", flush=True)
+                          f"{match_result.winner_strategy} wins "
+                          f"({match_result.num_moves} moves, "
+                          f"{match_result.duration_s:.1f}s)", flush=True)
             except Exception as exc:
                 print(f"  [{completed}/{total_matches}] "
                       f"{black_name} vs {white_name} FAILED: {exc}", file=sys.stderr)
@@ -470,152 +410,115 @@ def run_tournament(
 
 
 # ------------------------------------------------------------------
-# Scoring: threshold-based grades
+# Persistence
 # ------------------------------------------------------------------
 
-def compute_grades(
-    results: TournamentResults,
-    num_games: int = 5,
-) -> list[dict]:
-    """Compute threshold-based grades for student strategies.
-
-    Scoring (6-tier system):
-      - Beat Random: 5 pts
-      - Beat MCTS_Tier_1: 6 pts
-      - Beat MCTS_Tier_2: 7 pts
-      - Beat MCTS_Tier_3: 8 pts
-      - Beat MCTS_Tier_4: 9 pts
-      - Beat MCTS_Tier_5: 10 pts
-      - Score is the HIGHEST threshold reached.
-      - If you don't beat any default: 0 pts
-      - Auto-10: Top 3 students by total wins get score 10.
-    """
-    from collections import defaultdict
-
-    # wins[student][default] = count of wins
-    wins: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    games: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    total_wins: dict[str, int] = defaultdict(int)
-
-    defaults_set = set(DEFAULT_TIERS)
-
-    for m in results.matches:
-        # Identify student and default
-        if m.black_strategy in defaults_set and m.white_strategy in defaults_set:
-            continue  # default vs default, skip
-        if m.black_strategy not in defaults_set and m.white_strategy not in defaults_set:
-            continue  # student vs student, skip for grading
-
-        if m.black_strategy in defaults_set:
-            default_name = m.black_strategy
-            student_name = m.white_strategy
-        else:
-            default_name = m.white_strategy
-            student_name = m.black_strategy
-
-        games[student_name][default_name] += 1
-        if m.winner_strategy == student_name:
-            wins[student_name][default_name] += 1
-            total_wins[student_name] += 1
-
-    # Compute grades — need strictly more than half
-    threshold = num_games // 2 + 1  # Need to win majority (e.g., 3/5, 6/10)
-    grades = []
-    for student in sorted(set(wins.keys()) | set(games.keys())):
-        score = 0
-        beaten = []
-        for tier in DEFAULT_TIERS:
-            g = games[student].get(tier, 0)
-            w = wins[student].get(tier, 0)
-            if w >= threshold:
-                score = TIER_SCORES[tier]
-                beaten.append(tier)
-
-        detail = {}
-        for tier in DEFAULT_TIERS:
-            g = games[student].get(tier, 0)
-            w = wins[student].get(tier, 0)
-            detail[tier] = f"{w}/{g}"
-
-        grades.append({
-            "strategy": student,
-            "score": score,
-            "beaten": beaten,
-            "total_wins": total_wins[student],
-            "detail": detail,
-        })
-
-    grades.sort(key=lambda x: (-x["score"], -x["total_wins"]))
-
-    # Auto-10: top 3 students by total wins get score 10
-    if len(grades) >= 1:
-        win_counts = sorted(
-            {g["total_wins"] for g in grades}, reverse=True,
-        )
-        # Find the threshold for top 3 (handle ties at 3rd place)
-        top3_threshold = win_counts[min(2, len(win_counts) - 1)]
-        if top3_threshold > 0:  # Don't give auto-10 for 0 wins
-            for g in grades:
-                if g["total_wins"] >= top3_threshold:
-                    if g["score"] < 10:
-                        g["score"] = 10
-                        g["auto_10"] = True
-
-    grades.sort(key=lambda x: (-x["score"], -x["total_wins"]))
-    return grades
+def _match_record_to_dict(m: MatchRecord) -> dict:
+    """Convert MatchRecord to JSON-serializable dict."""
+    d = asdict(m)
+    # Convert move_log MoveRecord dataclasses
+    d["move_log"] = [
+        {
+            "move_number": ml["move_number"],
+            "player": ml["player"],
+            "cell": ml["cell"],
+            "time_s": ml["time_s"],
+            "result": ml["result"],
+        }
+        for ml in d["move_log"]
+    ]
+    return d
 
 
-def print_grades(grades: list[dict]) -> None:
-    """Print a nicely formatted grade table."""
-    print(f"\n{'='*72}")
-    print(f"  GRADES (threshold scoring)")
-    print(f"{'='*72}")
-    print(f"  {'Strategy':<25}{'Score':>7}{'Beaten':>20}  Detail")
-    print(f"  {'-'*65}")
-    for g in grades:
-        beaten = ", ".join(g["beaten"]) if g["beaten"] else "none"
-        detail = "  ".join(f"{k}: {v}" for k, v in g["detail"].items())
-        auto = " (auto-10: top 3)" if g.get("auto_10") else ""
-        print(f"  {g['strategy']:<25}{g['score']:>7}{beaten:>20}  {detail}{auto}")
-    print()
-
-    # Top 3 highlight
-    if len(grades) >= 3:
-        print("  TOP 3 (auto-10):")
-        for i, g in enumerate(grades[:3]):
-            medal = ["#1", "#2", "#3"][i]
-            print(f"    {medal} {g['strategy']} — score: {g['score']}, "
-                  f"total wins: {g['total_wins']}")
-        print()
-
-
-# ------------------------------------------------------------------
-# Full tournament JSON export
-# ------------------------------------------------------------------
-
-def build_tournament_json(
-    results: TournamentResults,
+def save_results(
+    run_dir: Path,
+    all_matches: list[MatchRecord],
+    classic_table: list[LeagueEntry],
+    dark_table: list[LeagueEntry],
+    combined: list[CombinedEntry],
     grades: list[dict],
     config: dict,
-) -> dict:
-    tid = config.get("tournament_id", "tournament")
-    return {
-        "tournament_id": tid,
-        "timestamp": datetime.now().isoformat(),
-        "config": config,
-        "matches": [asdict(m) for m in results.matches],
-        "grades": grades,
+) -> None:
+    """Save all tournament results to the run directory."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # config.json
+    (run_dir / "config.json").write_text(
+        json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    # games.jsonl (streamed, crash-safe)
+    with (run_dir / "games.jsonl").open("w", encoding="utf-8") as f:
+        for i, m in enumerate(all_matches):
+            record = _match_record_to_dict(m)
+            record["game_id"] = i + 1
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    # League tables
+    (run_dir / "classic_league.json").write_text(
+        json.dumps([asdict(e) for e in classic_table], indent=2), encoding="utf-8"
+    )
+    (run_dir / "dark_league.json").write_text(
+        json.dumps([asdict(e) for e in dark_table], indent=2), encoding="utf-8"
+    )
+
+    # Combined standings
+    (run_dir / "combined_standings.json").write_text(
+        json.dumps([asdict(e) for e in combined], indent=2), encoding="utf-8"
+    )
+
+    # Grades
+    (run_dir / "grades.json").write_text(
+        json.dumps(grades, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    # Grades CSV
+    with (run_dir / "grades.csv").open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["name", "grade", "tier_beaten", "total_wins", "league_rank"])
+        for g in grades:
+            tier = g["beaten"][-1] if g["beaten"] else "none"
+            writer.writerow([g["strategy"], g["score"], tier, g["total_wins"], ""])
+
+    # Summary
+    with (run_dir / "summary.txt").open("w", encoding="utf-8") as f:
+        f.write(f"Tournament: {config.get('timestamp', '')}\n")
+        f.write(f"Board: {config.get('board_size', 11)}×{config.get('board_size', 11)}\n")
+        f.write(f"Games/pair/variant: {config.get('games_per_pair', 4)}\n")
+        f.write(f"Timeout: {config.get('move_timeout', 10.0)}s/move\n")
+        f.write(f"Strategies: {config.get('num_strategies', '?')}\n")
+        f.write(f"Total games: {len(all_matches)}\n\n")
+        f.write("Combined Standings:\n")
+        for e in combined:
+            f.write(f"  {e.strategy}: {e.total_pts} pts "
+                    f"(classic={e.classic_pts}, dark={e.dark_pts}, "
+                    f"avg_rank={e.avg_rank:.1f})\n")
+        f.write("\nGrades:\n")
+        for g in grades:
+            f.write(f"  {g['strategy']}: {g['score']}\n")
+
+    # Latest symlink
+    results_dir = run_dir.parent.parent
+    latest = results_dir / "latest"
+    try:
+        if latest.is_symlink() or latest.exists():
+            latest.unlink()
+        latest.symlink_to(run_dir)
+    except OSError:
+        pass
+
+    # History append
+    history_path = results_dir / "history.jsonl"
+    top3 = [g["strategy"] for g in grades[:3]]
+    history_entry = {
+        "timestamp": config.get("timestamp", ""),
+        "num_strategies": config.get("num_strategies", 0),
+        "num_games": len(all_matches),
+        "top_3": top3,
+        "path": str(run_dir),
     }
-
-
-# ------------------------------------------------------------------
-# Canonical rounds
-# ------------------------------------------------------------------
-
-CANONICAL_ROUNDS = [
-    {"variant": "classic"},
-    {"variant": "dark"},
-]
+    with history_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(history_entry, ensure_ascii=False) + "\n")
 
 
 # ------------------------------------------------------------------
@@ -624,54 +527,36 @@ CANONICAL_ROUNDS = [
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Hex strategy tournament",
+        description="Hex strategy tournament (league format)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  python tournament.py                                    # quick: classic, 5 games/pair
-  python tournament.py --variant dark                     # dark hex (fog of war)
+  python tournament.py                                    # quick: classic only, 4 games/pair
+  python tournament.py --variant dark                     # dark hex only
   python tournament.py --official                         # both variants (classic + dark)
-  python tournament.py --official --num-games 10          # 10 games per pair per variant
+  python tournament.py --official --num-games 4           # 4 games per pair per variant
   python tournament.py --team my_team                     # your team vs defaults
   python tournament.py --eval                             # students vs defaults only
 """,
     )
-    parser.add_argument("--board-size", type=int, default=11,
-                        help="Board side length (default: 11)")
-    parser.add_argument("--variant", choices=["classic", "dark"], default="classic",
-                        help="Game variant: classic (full info) or dark (fog of war) (default: classic)")
-    parser.add_argument("--num-games", type=int, default=5,
-                        help="Games per pair (default: 5, alternating colors)")
-    parser.add_argument("--seed", type=int, default=None,
-                        help="Random seed (default: random for official, 42 otherwise)")
-    parser.add_argument("--workers", type=int, default=None,
-                        help="Max parallel workers (default: auto)")
+    parser.add_argument("--board-size", type=int, default=11)
+    parser.add_argument("--variant", choices=["classic", "dark"], default="classic")
+    parser.add_argument("--num-games", type=int, default=4,
+                        help="Games per pair per variant (must be even, default: 4)")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--move-timeout", type=float, default=15.0,
                         help="Max seconds per move (default: 15.0)")
-    parser.add_argument("--memory", type=int, default=8192,
-                        help="Memory limit in MB per match (default: 4096)")
-    parser.add_argument("--csv", type=str, default=None,
-                        help="Save results CSV path")
-    parser.add_argument("--json", type=str, default=None,
-                        help="Save results JSON path")
+    parser.add_argument("--memory", type=int, default=8192)
     parser.add_argument("--official", action="store_true",
                         help="Run both variants (classic + dark)")
-    parser.add_argument("--team", type=str, default=None,
-                        help="Run only this team's strategy (+ defaults)")
+    parser.add_argument("--team", type=str, default=None)
     parser.add_argument("--eval", action="store_true",
-                        help="Evaluation mode: students vs defaults only (no student vs student)")
-    parser.add_argument("--name", type=str, default=None,
-                        help="Optional human-readable tournament name")
+                        help="Students vs defaults only")
+    parser.add_argument("--name", type=str, default=None)
     args = parser.parse_args()
 
     from strategies import _discover_builtin, _discover_students
-
-    # Determine output directory
-    if args.team:
-        out_dir = Path(__file__).resolve().parent / "estudiantes" / args.team / "results"
-    else:
-        out_dir = RESULTS_DIR
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     # Discover strategies
     strat_infos: list[tuple[tuple[str, str], str]] = []
@@ -695,13 +580,15 @@ examples:
     master_seed = args.seed if args.seed is not None else random.randint(0, 2**31)
     rng = random.Random(master_seed)
 
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+
     if args.official:
-        _run_official(args, strat_infos, out_dir, rng)
+        _run_official(args, strat_infos, rng, timestamp)
     else:
-        _run_single(args, strat_infos, out_dir, rng)
+        _run_single(args, strat_infos, rng, timestamp)
 
 
-def _run_single(args, strat_infos, out_dir, rng) -> None:
+def _run_single(args, strat_infos, rng, timestamp) -> None:
     """Run a single-variant tournament."""
     seed = rng.randint(0, 2**31)
 
@@ -709,7 +596,7 @@ def _run_single(args, strat_infos, out_dir, rng) -> None:
     print(f"  VARIANT: {args.variant}  |  BOARD: {args.board_size}×{args.board_size}")
     print(f"{'='*60}\n")
 
-    results = run_tournament(
+    matches = run_tournament(
         strategies_info=strat_infos,
         board_size=args.board_size,
         variant=args.variant,
@@ -721,58 +608,48 @@ def _run_single(args, strat_infos, out_dir, rng) -> None:
         eval_mode=args.eval or bool(args.team),
     )
 
-    results.print_summary()
-    results.print_matchup_table()
+    table = compute_league_table(matches, args.variant)
+    print_league_table(table, args.variant)
+    print_matchup_table(matches, args.variant)
 
-    grades = compute_grades(results, num_games=args.num_games)
+    # Build combined entries from single league for grading
+    single_combined = [
+        CombinedEntry(
+            strategy=e.strategy,
+            classic_pts=e.points if args.variant == "classic" else 0,
+            dark_pts=e.points if args.variant == "dark" else 0,
+            total_pts=e.points,
+            classic_rank=e.rank if args.variant == "classic" else 0,
+            dark_rank=e.rank if args.variant == "dark" else 0,
+            avg_rank=float(e.rank),
+        )
+        for e in table
+    ]
+    grades = compute_grades(single_combined)
     print_grades(grades)
 
-    csv_path = args.csv or str(out_dir / f"tournament_{args.variant}.csv")
-    results.to_csv(csv_path)
-    print(f"CSV saved to {csv_path}")
 
-    if args.json:
-        json_path = args.json
-    else:
-        json_path = str(out_dir / f"tournament_{args.variant}.json")
-
-    config = {
-        "board_size": args.board_size,
-        "variant": args.variant,
-        "num_games": args.num_games,
-        "move_timeout": args.move_timeout,
-        "memory_limit_mb": args.memory,
-    }
-    data = build_tournament_json(results, grades, config)
-    Path(json_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(json_path).write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    print(f"JSON saved to {json_path}")
-
-
-def _run_official(args, strat_infos, out_dir, rng) -> None:
-    """Run the official tournament: both variants."""
-    all_results = TournamentResults()
+def _run_official(args, strat_infos, rng, timestamp) -> None:
+    """Run the official tournament: both variants with league scoring."""
+    all_matches: list[MatchRecord] = []
 
     print(f"\n{'#'*60}")
-    print(f"  OFFICIAL TOURNAMENT")
+    print(f"  OFFICIAL TOURNAMENT (League Format)")
     print(f"  Board: {args.board_size}×{args.board_size}")
-    print(f"  Games per pair: {args.num_games}")
+    print(f"  Games per pair per variant: {args.num_games}")
     print(f"  Timeout: {args.move_timeout}s/move | Memory: {args.memory}MB")
     print(f"{'#'*60}")
 
-    for rd in CANONICAL_ROUNDS:
-        variant = rd["variant"]
+    for variant in ["classic", "dark"]:
         round_seed = rng.randint(0, 2**31)
 
         print(f"\n{'='*60}")
-        print(f"  ROUND: {variant}"
+        print(f"  LEAGUE: {variant.upper()}"
               + (" (fog of war)" if variant == "dark" else ""))
         print(f"{'='*60}\n")
 
         t0 = _time_mod.time()
-        results = run_tournament(
+        matches = run_tournament(
             strategies_info=strat_infos,
             board_size=args.board_size,
             variant=variant,
@@ -785,47 +662,53 @@ def _run_official(args, strat_infos, out_dir, rng) -> None:
         )
         elapsed = _time_mod.time() - t0
 
-        results.print_summary()
-        results.print_matchup_table()
-        print(f"Elapsed: {elapsed:.1f}s")
+        table = compute_league_table(matches, variant)
+        print_league_table(table, variant)
+        print_matchup_table(matches, variant)
+        print(f"  Elapsed: {elapsed:.1f}s")
 
-        all_results.matches.extend(results.matches)
+        all_matches.extend(matches)
 
-    # Overall grades
-    grades = compute_grades(all_results, num_games=args.num_games * len(CANONICAL_ROUNDS))
+    # Combined standings
+    classic_table = compute_league_table(all_matches, "classic")
+    dark_table = compute_league_table(all_matches, "dark")
+    combined = compute_combined_standings(classic_table, dark_table)
+    print_combined_standings(combined)
+
+    # Grades (from league position)
+    grades = compute_grades(combined)
     print_grades(grades)
 
-    # Save
-    csv_path = args.csv or str(out_dir / "tournament_official.csv")
-    all_results.to_csv(csv_path)
-    print(f"CSV saved to {csv_path}")
+    # Get git commit hash
+    git_hash = ""
+    try:
+        import subprocess
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        pass
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if args.json:
-        json_path = args.json
-    else:
-        run_dir = out_dir / "runs" / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        json_path = str(run_dir / "tournament_results.json")
-
+    # Persistence
     config = {
-        "tournament_id": run_id,
+        "timestamp": timestamp,
         "name": args.name,
         "board_size": args.board_size,
-        "num_games": args.num_games,
+        "games_per_pair": args.num_games,
         "move_timeout": args.move_timeout,
         "memory_limit_mb": args.memory,
-        "rounds": CANONICAL_ROUNDS,
+        "variants": ["classic", "dark"],
+        "num_strategies": len(strat_infos),
+        "strategies": [
+            {"name": name, "source": info[0], "cls": info[1]}
+            for info, name in strat_infos
+        ],
+        "git_commit": git_hash,
     }
-    data = build_tournament_json(all_results, grades, config)
-    Path(json_path).parent.mkdir(parents=True, exist_ok=True)
-    json_content = json.dumps(data, indent=2, ensure_ascii=False)
-    Path(json_path).write_text(json_content, encoding="utf-8")
-    print(f"JSON saved to {json_path}")
 
-    latest_path = out_dir / "latest.json"
-    latest_path.write_text(json_content, encoding="utf-8")
-    print(f"Latest copy: {latest_path}")
+    run_dir = RESULTS_DIR / "runs" / timestamp
+    save_results(run_dir, all_matches, classic_table, dark_table, combined, grades, config)
+    print(f"Results saved to {run_dir}")
 
 
 if __name__ == "__main__":
