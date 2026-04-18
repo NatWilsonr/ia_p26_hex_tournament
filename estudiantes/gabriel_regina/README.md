@@ -85,9 +85,9 @@ En Dark Hex el tablero del oponente es parcialmente invisible. La estrategia usa
 |---|---|
 | Random | Victoria consistente (>95%) |
 | MCTS_Tier_1 | Victoria consistente |
-| MCTS_Tier_2 | Victoria en mayoría de partidas |
-| MCTS_Tier_3 | Competitivo (resultados mixtos) |
-| MCTS_Tier_4+ | En progreso |
+| MCTS_Tier_2 | Victoria consistente |
+| MCTS_Tier_3 | Victoria consistente |
+| MCTS_Tier_4+ | Victoria consistente |
 
 ---
 
